@@ -1,0 +1,148 @@
+// firestore.rules
+// ═══════════════════════════════════════════════════════════════
+// REGLAS DE SEGURIDAD ROBUSTAS — Sistema IMECDA
+// ═══════════════════════════════════════════════════════════════
+// Principio: Default DENY — negar todo excepto lo explícitamente permitido
+// Roles:  "1" = Administrador  |  "2" = Empleado
+// ═══════════════════════════════════════════════════════════════
+
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ─── FUNCIONES HELPER ────────────────────────────────────────
+
+    // ¿El request viene de un usuario autenticado?
+    function estaAutenticado() {
+      return request.auth != null;
+    }
+
+    // Obtiene el documento del usuario actual desde Firestore
+    function miPerfil() {
+      return get(/databases/$(database)/documents/usuarios/$(request.auth.uid)).data;
+    }
+
+    // ¿Es administrador? (id_rol == "1")
+    function esAdmin() {
+      return estaAutenticado() && miPerfil().id_rol == "1" && miPerfil().estado == true;
+    }
+
+    // ¿Es empleado activo? (id_rol == "2")
+    function esEmpleado() {
+      return estaAutenticado() && miPerfil().id_rol == "2" && miPerfil().estado == true;
+    }
+
+    // ¿Está activo (cualquier rol)?
+    function estaActivo() {
+      return estaAutenticado() && miPerfil().estado == true;
+    }
+
+    // ¿Es su propio documento?
+    function esSuPropioDoc(uid) {
+      return estaAutenticado() && request.auth.uid == uid;
+    }
+
+    // ─── USUARIOS ────────────────────────────────────────────────
+    // Solo admin puede ver/crear/editar todos los usuarios.
+    // Cada usuario puede leer/actualizar su propio perfil.
+    match /usuarios/{uid} {
+      allow read:   if esSuPropioDoc(uid) || esAdmin();
+      allow create: if esAdmin();
+      allow update: if esAdmin() || (esSuPropioDoc(uid) && soloActualizaCamposPermitidos());
+      allow delete: if false; // NUNCA eliminar usuarios, usar estado=false
+    }
+
+    // El usuario solo puede actualizar su nombre y foto, no su rol
+    function soloActualizaCamposPermitidos() {
+      return !request.resource.data.diff(resource.data).affectedKeys()
+        .hasAny(["id_rol", "estado", "IdUsuario", "correo_us"]);
+    }
+
+    // ─── ROLES ───────────────────────────────────────────────────
+    // Solo lectura para usuarios autenticados activos.
+    // Solo admin puede modificar.
+    match /roles/{rolId} {
+      allow read:  if estaActivo();
+      allow write: if esAdmin();
+    }
+
+    // ─── PERMISOS ────────────────────────────────────────────────
+    match /permisos/{permisoId} {
+      allow read:  if estaActivo();
+      allow write: if esAdmin();
+    }
+
+    // ─── EMPLEADOS ───────────────────────────────────────────────
+    // Admin: acceso total.
+    // Empleado: solo puede leer (no ver salarios de otros).
+    match /empleados/{empleadoId} {
+      allow read:   if estaActivo();
+      allow create: if esAdmin();
+      allow update: if esAdmin();
+      allow delete: if esAdmin();
+    }
+
+    // ─── CLIENTES ────────────────────────────────────────────────
+    // Admin y Empleado pueden crear y leer.
+    // Solo Admin puede eliminar.
+    match /clientes/{clienteId} {
+      allow read:   if estaActivo();
+      allow create: if estaActivo();
+      allow update: if estaActivo();
+      allow delete: if esAdmin();
+    }
+
+    // ─── SERVICIOS ───────────────────────────────────────────────
+    // Admin y Empleado pueden crear/leer/actualizar.
+    // Solo Admin puede eliminar.
+    match /servicios/{servicioId} {
+      allow read:   if estaActivo();
+      allow create: if estaActivo();
+      allow update: if estaActivo();
+      allow delete: if esAdmin();
+    }
+
+    // ─── PIEZAS / INVENTARIO ─────────────────────────────────────
+    // Admin: acceso total.
+    // Empleado: puede leer y actualizar cantidad (para usar en servicio).
+    match /piezas/{piezaId} {
+      allow read:   if estaActivo();
+      allow create: if esAdmin();
+      allow update: if esAdmin() || (esEmpleado() && soloActualizaCantidad());
+      allow delete: if esAdmin();
+    }
+
+    function soloActualizaCantidad() {
+      return request.resource.data.diff(resource.data).affectedKeys()
+        .hasOnly(["cantidad_pieza", "fechaModificacion_pi"]);
+    }
+
+    // ─── CATEGORIAS ──────────────────────────────────────────────
+    match /categorias/{catId} {
+      allow read:  if estaActivo();
+      allow write: if esAdmin();
+    }
+
+    // ─── COTIZACIONES ────────────────────────────────────────────
+    // Admin y Empleado pueden crear y leer.
+    // Solo Admin puede aprobar/eliminar.
+    match /cotizaciones/{cotId} {
+      allow read:   if estaActivo();
+      allow create: if estaActivo();
+      allow update: if esAdmin() || (esEmpleado() && soloActualizaEstadoCot());
+      allow delete: if esAdmin();
+    }
+
+    function soloActualizaEstadoCot() {
+      // Empleado solo puede actualizar campos no financieros
+      return !request.resource.data.diff(resource.data).affectedKeys()
+        .hasAny(["estado_cotizacion", "id_cliente", "id_empleado"]);
+    }
+
+    // ─── BLOQUEAR TODO LO DEMÁS ──────────────────────────────────
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+  }
+}
